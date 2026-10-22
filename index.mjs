@@ -1002,8 +1002,13 @@ function makePlugin() {
 
           // The claim answer carries only what this claim granted (empty
           // when today was already settled), not the ledger: read the
-          // subscription again for the full balance.
-          const after = baselineOf(await controlCall(a, "GET", "/v1/subscription"))
+          // subscription again for the full balance. A failed re-read must
+          // not turn a claim that succeeded into a retryable failure.
+          let updated = null
+          try {
+            updated = await controlCall(a, "GET", "/v1/subscription")
+          } catch {}
+          const after = baselineOf(updated)
           if (!before || !after) return { outcome: "done", message: "check-in acknowledged (balance unavailable)" }
           const gained = Math.floor(gainedBetween(before, after))
           if (gained > 0) return { outcome: "claimed", credit: gained, message: `claimed ${gained} credits` }

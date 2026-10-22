@@ -206,6 +206,17 @@ test("a balance that can't be re-read after a claim is acknowledged without a cr
   expect(out.credit).toBeUndefined()
 })
 
+test("a re-read that throws doesn't turn a successful claim into a failure", async () => {
+  serve({
+    "GET /v1/subscription": [ok(before), () => { throw new Error("network down") }],
+    "POST /v1/subscription/bonus/claim": ok({ bonus_skus: [] }),
+  })
+  const out = await checkin(auth())
+  expect(out.outcome).toBe("done")
+  expect(out.message).toContain("balance unavailable")
+  expect(out.credit).toBeUndefined()
+})
+
 test("expired temporary credentials fail before any request", async () => {
   let called = 0
   globalThis.fetch = async () => {
