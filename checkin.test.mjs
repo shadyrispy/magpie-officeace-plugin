@@ -36,6 +36,13 @@ function serve(routes) {
     calls.push({ url: u, init, headers: new Headers(init.headers) })
     const route = routes[`${init.method || "GET"} ${u.pathname}`]
     if (!route) return new Response("not found", { status: 404 })
+    // an array answers one request per response, in order: the balance is
+    // read before and after the claim
+    if (Array.isArray(route)) {
+      const next = route.shift()
+      if (!next) return new Response("not found", { status: 404 })
+      return typeof next === "function" ? next(init) : next
+    }
     return typeof route === "function" ? route(init) : route
   }
   return calls
@@ -61,8 +68,10 @@ function assertNoSecret(value) {
 
 test("a claim that grows the balance is claimed with the delta", async () => {
   const calls = serve({
-    "GET /v1/subscription": () => ok(before),
-    "POST /v1/subscription/bonus/claim": () => ok(after),
+    "GET /v1/subscription": [ok(before), ok(after)],
+    // the claim answers only what this claim granted — here nothing, since
+    // the change is read from the subscription again
+    "POST /v1/subscription/bonus/claim": ok({ bonus_skus: [] }),
   })
 
   const out = await checkin(auth())
@@ -70,7 +79,11 @@ test("a claim that grows the balance is claimed with the delta", async () => {
   expect(out.outcome).toBe("claimed")
   expect(out.credit).toBe(100)
   expect(out.message).toContain("100")
-  expect(calls.map((c) => c.url.pathname)).toEqual(["/v1/subscription", "/v1/subscription/bonus/claim"])
+  expect(calls.map((c) => c.url.pathname)).toEqual([
+    "/v1/subscription",
+    "/v1/subscription/bonus/claim",
+    "/v1/subscription",
+  ])
   expect(calls[1].init.method).toBe("POST")
   expect(calls[1].init.body).toBe("{}")
   expect(calls[1].headers.get("content-type")).toBe("application/json")
@@ -82,8 +95,8 @@ test("a claim that grows the balance is claimed with the delta", async () => {
 
 test("an idempotent claim that adds nothing is done", async () => {
   serve({
-    "GET /v1/subscription": () => ok(after),
-    "POST /v1/subscription/bonus/claim": () => ok(after),
+    "GET /v1/subscription": [ok(after), ok(after)],
+    "POST /v1/subscription/bonus/claim": ok({ bonus_skus: [] }),
   })
 
   const out = await checkin(auth())
@@ -118,7 +131,7 @@ test("an imported gateway key is inactive, not a lapsed sign-in", async () => {
 })
 
 test("401 on the balance read fails without claiming", async () => {
-  const calls = serve({ "GET /v1/subscription": () => new Response("unauthorized", { status: 401 }) })
+  const calls = serve({ "GET /v1/subscription": [new Response("unauthorized", { status: 401 })] })
   const out = await checkin(auth())
   expect(out.outcome).toBe("failed")
   expect(out.message).toContain("sign in again")
@@ -128,8 +141,8 @@ test("401 on the balance read fails without claiming", async () => {
 
 test("a rate-limited claim is failed and retryable", async () => {
   serve({
-    "GET /v1/subscription": () => ok(after),
-    "POST /v1/subscription/bonus/claim": () => new Response("slow down", { status: 429 }),
+    "GET /v1/subscription": [ok(after)],
+    "POST /v1/subscription/bonus/claim": new Response("slow down", { status: 429 }),
   })
   const out = await checkin(auth())
   expect(out.outcome).toBe("failed")
@@ -138,8 +151,8 @@ test("a rate-limited claim is failed and retryable", async () => {
 
 test("a vendor error is failed and a token it echoes is redacted", async () => {
   serve({
-    "GET /v1/subscription": () => ok(after),
-    "POST /v1/subscription/bonus/claim": () => new Response(
+    "GET /v1/subscription": [ok(after)],
+    "POST /v1/subscription/bonus/claim": new Response(
       JSON.stringify({ error_code: "OfficeAce.11020001", error_msg: `bad token ${securityToken}` }),
       { status: 500 },
     ),
@@ -151,20 +164,20 @@ test("a vendor error is failed and a token it echoes is redacted", async () => {
   assertNoSecret(out)
 })
 
-test("an unreadable claim answer is failed", async () => {
+test("a claim answer that isn't the ledger is re-read from the subscription", async () => {
   serve({
-    "GET /v1/subscription": () => ok(after),
-    "POST /v1/subscription/bonus/claim": () => new Response("[1,2]", { status: 200 }),
+    "GET /v1/subscription": [ok(before), ok(after)],
+    "POST /v1/subscription/bonus/claim": new Response("[1,2]", { status: 200 }),
   })
   const out = await checkin(auth())
-  expect(out.outcome).toBe("failed")
-  expect(out.message).toContain("nothing readable")
+  expect(out.outcome).toBe("claimed")
+  expect(out.credit).toBe(100)
 })
 
 test("a balance read that fails another way still claims, saying the balance was unavailable", async () => {
   serve({
-    "GET /v1/subscription": () => new Response("boom", { status: 500 }),
-    "POST /v1/subscription/bonus/claim": () => ok(after),
+    "GET /v1/subscription": [new Response("boom", { status: 500 }), ok(after)],
+    "POST /v1/subscription/bonus/claim": ok({ bonus_skus: [] }),
   })
   const out = await checkin(auth())
   expect(out.outcome).toBe("done")
@@ -173,8 +186,19 @@ test("a balance read that fails another way still claims, saying the balance was
 
 test("an error body read as the balance isn't taken for a baseline", async () => {
   serve({
-    "GET /v1/subscription": () => ok({ error_code: "OfficeAce.1001", error_msg: "temporarily unavailable" }),
-    "POST /v1/subscription/bonus/claim": () => ok(after),
+    "GET /v1/subscription": [ok({ error_code: "OfficeAce.1001", error_msg: "temporarily unavailable" }), ok(after)],
+    "POST /v1/subscription/bonus/claim": ok({ bonus_skus: [] }),
+  })
+  const out = await checkin(auth())
+  expect(out.outcome).toBe("done")
+  expect(out.message).toContain("balance unavailable")
+  expect(out.credit).toBeUndefined()
+})
+
+test("a balance that can't be re-read after a claim is acknowledged without a credit", async () => {
+  serve({
+    "GET /v1/subscription": [ok(before), new Response("boom", { status: 500 })],
+    "POST /v1/subscription/bonus/claim": ok({ bonus_skus: [] }),
   })
   const out = await checkin(auth())
   expect(out.outcome).toBe("done")

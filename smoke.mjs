@@ -18,6 +18,7 @@ const TOKENS = {
 }
 const calls = []
 const real = globalThis.fetch
+let claimed = false
 globalThis.fetch = async (url, init = {}) => {
   const u = new URL(String(url))
   calls.push(u.pathname)
@@ -33,9 +34,17 @@ globalThis.fetch = async (url, init = {}) => {
       { headers: { "content-type": "text/event-stream" } },
     )
   if (u.pathname === "/v1/subscription")
-    return Response.json({ skus: [{ sku_code: "officeace.personal.package.standard", sku_name: "标准版", quotas: [{ sku_attr_code: "officeace_points", sku_value: "10000", current_value: "1234" }] }], bonus_skus: [] })
-  if (u.pathname === "/v1/subscription/bonus/claim")
-    return Response.json({ skus: [], bonus_skus: [{ activity_id: "daily", activity_name: "每日签到", points: "100", current_value: "0" }] })
+    return Response.json({
+      skus: [{ sku_code: "officeace.personal.package.standard", sku_name: "标准版", quotas: [{ sku_attr_code: "officeace_points", sku_value: "10000", current_value: "1234" }] }],
+      bonus_skus: claimed
+        ? [{ activity_id: "daily", activity_name: "每日签到", points: "100", current_value: "0" }]
+        : [],
+    })
+  if (u.pathname === "/v1/subscription/bonus/claim") {
+    claimed = true
+    // the claim answer only names what this claim granted; the ledger is read again
+    return Response.json({ bonus_skus: [] })
+  }
   return new Response("", { status: 404 })
 }
 

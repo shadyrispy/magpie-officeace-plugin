@@ -470,6 +470,15 @@ function redacted(a, text) {
   return out.length > 200 ? out.slice(0, 197) + "..." : out
 }
 
+// baselineOf is a subscription answer usable as a balance: its bonus list,
+// no vendor error, and an object rather than an error page. Anything else
+// would make every bonus look new.
+function baselineOf(res) {
+  const json = res?.json
+  return res?.ok && json && typeof json === "object" && !Array.isArray(json)
+    && !vendorError(json) && Array.isArray(json.bonus_skus) ? json : null
+}
+
 const TIER_NAMES = { trial: "试用版", starter: "入门版", standard: "标准版", advanced: "高级版", premium: "尊享版", ultimate: "旗舰版" }
 
 const compact = (n) => (Number.isInteger(n) ? String(n) : n.toFixed(2).replace(/0+$/, "").replace(/\.$/, ""))
@@ -974,15 +983,11 @@ function makePlugin() {
 
           // A balance read that fails for another reason doesn't block the
           // claim; a refused sign-in does.
-          let before = null
           const read = await controlCall(a, "GET", "/v1/subscription")
           if (read.status === 401 || read.status === 403)
             return { outcome: "failed", message: "the subscription was refused; let magpie renew the account, or sign in again" }
           if (read.status === 429) return { outcome: "failed", message: "the subscription is rate limited; retry later" }
-          // only a subscription with its bonus list is a baseline: an error
-          // body or one without it would make every bonus look new
-          if (read.ok && read.json && typeof read.json === "object" && !Array.isArray(read.json)
-            && !vendorError(read.json) && Array.isArray(read.json.bonus_skus)) before = read.json
+          const before = baselineOf(read)
 
           const claim = await claimBonus(a)
           if (claim.status === 401 || claim.status === 403)
@@ -992,12 +997,15 @@ function makePlugin() {
             const why = redacted(a, vendorError(claim.json) || claim.text)
             return { outcome: "failed", message: `the claim failed: HTTP ${claim.status}${why ? `: ${why}` : ""}` }
           }
-          if (!claim.json || typeof claim.json !== "object" || Array.isArray(claim.json))
-            return { outcome: "failed", message: "OfficeAce's claim gave nothing readable" }
           const why = redacted(a, vendorError(claim.json))
           if (why) return { outcome: "failed", message: `the claim was refused: ${why}` }
-          if (!before) return { outcome: "done", message: "check-in acknowledged (balance unavailable)" }
-          const gained = Math.floor(gainedBetween(before, claim.json))
+
+          // The claim answer carries only what this claim granted (empty
+          // when today was already settled), not the ledger: read the
+          // subscription again for the full balance.
+          const after = baselineOf(await controlCall(a, "GET", "/v1/subscription"))
+          if (!before || !after) return { outcome: "done", message: "check-in acknowledged (balance unavailable)" }
+          const gained = Math.floor(gainedBetween(before, after))
           if (gained > 0) return { outcome: "claimed", credit: gained, message: `claimed ${gained} credits` }
           return { outcome: "done", message: "no reward left to claim today" }
         } catch (e) {
